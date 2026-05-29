@@ -85,12 +85,19 @@ class ZendeskClient:
     # Allowed image MIME types. SVG is excluded — it can contain active XML/JS content.
     _ALLOWED_IMAGE_TYPES = {'image/jpeg', 'image/png', 'image/gif', 'image/webp'}
 
+    # Allowed document MIME types. PDF only — no office formats with macros.
+    _ALLOWED_DOCUMENT_TYPES = {'application/pdf'}
+
+    # Full allowlist of fetchable attachment types.
+    _ALLOWED_TYPES = _ALLOWED_IMAGE_TYPES | _ALLOWED_DOCUMENT_TYPES
+
     # Magic bytes (file signatures) for each allowed type.
     _MAGIC_BYTES: Dict[str, List[bytes]] = {
         'image/jpeg': [b'\xff\xd8\xff'],
         'image/png':  [b'\x89PNG\r\n\x1a\n'],
         'image/gif':  [b'GIF87a', b'GIF89a'],
         'image/webp': [b'RIFF'],  # RIFF....WEBP — checked further below
+        'application/pdf': [b'%PDF-'],
     }
 
     # 10 MB hard cap to guard against image bombs and token budget blowout.
@@ -123,14 +130,14 @@ class ZendeskClient:
 
     def get_ticket_attachment(self, content_url: str) -> Dict[str, Any]:
         """
-        Fetch an image attachment and return base64-encoded data.
+        Fetch an image or PDF attachment and return base64-encoded data.
 
         Security measures applied:
         - Host allowlist on content_url so the Zendesk auth header is never sent
           to an arbitrary/internal host (SSRF + credential-leak guard).
-        - Allowlist of safe image MIME types (no SVG or arbitrary binary).
+        - Allowlist of safe MIME types (images + PDF; no SVG or arbitrary binary).
         - Magic byte validation so the file header must match the declared type.
-        - 10 MB size cap to prevent image bombs and excessive token usage.
+        - 10 MB size cap to prevent file bombs and excessive token usage.
 
         Zendesk attachment URLs redirect to zdusercontent.com (Zendesk's CDN).
         requests strips the Authorization header on cross-origin redirects,
@@ -148,10 +155,10 @@ class ZendeskClient:
 
             content_type = response.headers.get('Content-Type', '').split(';')[0].strip().lower()
 
-            if content_type not in self._ALLOWED_IMAGE_TYPES:
+            if content_type not in self._ALLOWED_TYPES:
                 raise ValueError(
                     f"Attachment type '{content_type}' is not allowed. "
-                    f"Supported types: {sorted(self._ALLOWED_IMAGE_TYPES)}"
+                    f"Supported types: {sorted(self._ALLOWED_TYPES)}"
                 )
 
             # Read with size cap — stops download as soon as limit is exceeded.
