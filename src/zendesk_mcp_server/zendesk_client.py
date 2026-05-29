@@ -1,9 +1,15 @@
 from typing import Dict, Any, List
+import os
 import json
+import shutil
+import logging
+import subprocess
 import urllib.request
 import urllib.parse
 import base64
 import requests as _requests
+
+logger = logging.getLogger(__name__)
 
 from zenpy import Zenpy
 from zenpy.lib.api_objects import Comment
@@ -30,6 +36,14 @@ class ZendeskClient:
         credentials = f"{email}/token:{token}"
         encoded_credentials = base64.b64encode(credentials.encode()).decode('ascii')
         self.auth_header = f"Basic {encoded_credentials}"
+
+        # OCR config (used when a PDF has no usable text layer). Configurable
+        # via env so deployments can adjust without code changes.
+        self.tesseract_cmd = os.environ.get("ZENDESK_TESSERACT_CMD", "tesseract")
+        self.ocr_languages = os.environ.get("ZENDESK_OCR_LANGUAGES", "pol+eng")
+        self.ocr_dpi = int(os.environ.get("ZENDESK_OCR_DPI", "300"))
+        self.pdf_max_pages = int(os.environ.get("ZENDESK_PDF_MAX_PAGES", "50"))
+        self.ocr_timeout = int(os.environ.get("ZENDESK_OCR_TIMEOUT", "120"))
 
     def get_ticket(self, ticket_id: int) -> Dict[str, Any]:
         """
@@ -103,6 +117,15 @@ class ZendeskClient:
     # 10 MB hard cap to guard against image bombs and token budget blowout.
     _MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 
+    # A PDF page whose embedded text layer yields at least this many non-empty
+    # characters is treated as "has text" and used as-is; otherwise the page is
+    # rendered and run through OCR. Scanned pages typically yield ~0 characters.
+    _PDF_TEXT_MIN_CHARS_PER_PAGE = 16
+
+    # Cap on the extracted/OCR'd text returned for a single PDF, to protect the
+    # caller's token budget. Excess is truncated with a marker.
+    _MAX_PDF_TEXT_CHARS = 500_000
+
     def _validate_attachment_url(self, content_url: str) -> None:
         """
         Guard against SSRF / credential leakage.
@@ -130,7 +153,20 @@ class ZendeskClient:
 
     def get_ticket_attachment(self, content_url: str) -> Dict[str, Any]:
         """
-        Fetch an image or PDF attachment and return base64-encoded data.
+        Fetch an image or PDF attachment.
+
+        Images are returned as base64-encoded data. PDFs are returned as
+        extracted plain text rather than raw bytes: the base64 of a scanned PDF
+        easily exceeds the client's per-file size limit and isn't readable as an
+        image anyway. For each PDF page we use the embedded text layer when
+        present, and otherwise fall back to local OCR (tesseract) on a rendered
+        image of the page.
+
+        Returns a discriminated dict:
+        - image: ``{'kind': 'image', 'content_type': ..., 'data': <base64>}``
+        - pdf:   ``{'kind': 'text', 'content_type': 'application/pdf',
+                    'text': ..., 'extraction': 'text'|'ocr'|'mixed'|'empty',
+                    'pages': <int>, 'pages_processed': <int>, 'truncated': bool}``
 
         Security measures applied:
         - Host allowlist on content_url so the Zendesk auth header is never sent
@@ -184,7 +220,13 @@ class ZendeskClient:
             if content_type == 'image/webp' and content[8:12] != b'WEBP':
                 raise ValueError("File header does not match declared content type 'image/webp'.")
 
+            if content_type == 'application/pdf':
+                result = self._extract_pdf_text(content)
+                result['content_type'] = content_type
+                return result
+
             return {
+                'kind': 'image',
                 'data': base64.b64encode(content).decode('ascii'),
                 'content_type': content_type,
             }
@@ -192,6 +234,107 @@ class ZendeskClient:
             raise
         except Exception as e:
             raise Exception(f"Failed to fetch attachment from {content_url}: {str(e)}")
+
+    def _extract_pdf_text(self, content: bytes) -> Dict[str, Any]:
+        """
+        Extract text from a PDF byte string.
+
+        Per page: use the embedded text layer when it yields enough characters,
+        otherwise render the page and run it through tesseract OCR. This handles
+        text PDFs, fully scanned PDFs, and mixed documents. Processing is capped
+        at ``pdf_max_pages`` pages and ``_MAX_PDF_TEXT_CHARS`` characters.
+        """
+        try:
+            import pymupdf  # PyMuPDF >= 1.24 exposes the `pymupdf` name
+        except ImportError:  # pragma: no cover - older PyMuPDF only has `fitz`
+            import fitz as pymupdf
+
+        page_texts: List[str] = []
+        used_text = False
+        used_ocr = False
+
+        try:
+            doc = pymupdf.open(stream=content, filetype="pdf")
+        except Exception as e:
+            raise ValueError(f"Could not open PDF attachment: {e}")
+
+        with doc:
+            total_pages = doc.page_count
+            pages_to_process = min(total_pages, self.pdf_max_pages)
+            for i in range(pages_to_process):
+                page = doc.load_page(i)
+                text = (page.get_text("text") or "").strip()
+                if len(text) >= self._PDF_TEXT_MIN_CHARS_PER_PAGE:
+                    page_texts.append(text)
+                    used_text = True
+                else:
+                    ocr_text = self._ocr_pdf_page(page).strip()
+                    if ocr_text:
+                        page_texts.append(ocr_text)
+                        used_ocr = True
+
+        full_text = "\n\n".join(t for t in page_texts if t)
+
+        truncated = len(full_text) > self._MAX_PDF_TEXT_CHARS
+        if truncated:
+            full_text = full_text[:self._MAX_PDF_TEXT_CHARS] + "\n\n[...truncated...]"
+
+        if used_text and used_ocr:
+            extraction = 'mixed'
+        elif used_ocr:
+            extraction = 'ocr'
+        elif used_text:
+            extraction = 'text'
+        else:
+            extraction = 'empty'
+
+        return {
+            'kind': 'text',
+            'text': full_text,
+            'extraction': extraction,
+            'pages': total_pages,
+            'pages_processed': pages_to_process,
+            'truncated': truncated,
+        }
+
+    def _ocr_pdf_page(self, page) -> str:
+        """
+        Render a single PDF page to a PNG and OCR it with the tesseract binary.
+
+        The image is piped to tesseract via stdin (``tesseract stdin stdout``)
+        so no temporary files are involved.
+        """
+        if shutil.which(self.tesseract_cmd) is None:
+            raise ValueError(
+                f"The OCR binary '{self.tesseract_cmd}' was not found. Install "
+                "tesseract (and the language data, e.g. 'pol', 'eng') on the "
+                "host, or set ZENDESK_TESSERACT_CMD."
+            )
+
+        png = page.get_pixmap(dpi=self.ocr_dpi).tobytes("png")
+        try:
+            proc = subprocess.run(
+                [self.tesseract_cmd, "stdin", "stdout", "-l", self.ocr_languages],
+                input=png,
+                capture_output=True,
+                timeout=self.ocr_timeout,
+            )
+        except subprocess.TimeoutExpired:
+            raise ValueError(
+                f"OCR timed out after {self.ocr_timeout}s on a PDF page "
+                "(ZENDESK_OCR_TIMEOUT)."
+            )
+
+        if proc.returncode != 0:
+            # decode defensively — tesseract/leptonica can emit non-UTF-8 bytes.
+            err = proc.stderr.decode("utf-8", "replace").strip()
+            raise ValueError(
+                f"OCR failed (lang='{self.ocr_languages}'): {err}. Ensure the "
+                "tesseract language data is installed, or override "
+                "ZENDESK_OCR_LANGUAGES."
+            )
+
+        return proc.stdout.decode("utf-8", "replace")
 
     def post_comment(self, ticket_id: int, comment: str, public: bool = True) -> str:
         """

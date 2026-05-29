@@ -7,9 +7,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install minimal OS dependencies and create an unprivileged user
+# Install OS dependencies and create an unprivileged user.
+# tesseract-ocr (+ pol/eng language data) is required for OCR of scanned PDF
+# attachments; adjust the language packages to match ZENDESK_OCR_LANGUAGES.
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y ca-certificates \
+    && apt-get install --no-install-recommends -y \
+        ca-certificates \
+        tesseract-ocr \
+        tesseract-ocr-pol \
+        tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system appuser \
     && useradd --system --gid appuser --shell /usr/sbin/nologin appuser

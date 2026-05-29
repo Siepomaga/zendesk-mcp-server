@@ -17,6 +17,22 @@ This server provides a comprehensive integration with Zendesk. It offers:
 
 - build: `uv venv && uv pip install -e .` or `uv build` in short.
 - setup zendesk credentials in `.env` file, refer to [.env.example](.env.example).
+- **OCR (optional, for scanned PDFs):** PDF attachments are returned as
+  extracted text. When a PDF has a text layer it is used directly; otherwise the
+  server falls back to OCR, which requires the `tesseract` binary and the
+  relevant language data on the host. On macOS: `brew install tesseract
+  tesseract-lang`; on Debian/Ubuntu: `apt-get install tesseract-ocr
+  tesseract-ocr-pol tesseract-ocr-eng`. The Docker image installs these
+  automatically. OCR behaviour is tunable via environment variables:
+
+  | Variable | Default | Purpose |
+  | --- | --- | --- |
+  | `ZENDESK_OCR_LANGUAGES` | `pol+eng` | tesseract `-l` value (installed language packs) |
+  | `ZENDESK_OCR_DPI` | `300` | Render resolution for OCR |
+  | `ZENDESK_PDF_MAX_PAGES` | `50` | Max pages processed per PDF |
+  | `ZENDESK_OCR_TIMEOUT` | `120` | Per-page OCR timeout (seconds) |
+  | `ZENDESK_TESSERACT_CMD` | `tesseract` | Path to the tesseract binary |
+
 - configure in Claude desktop:
 
 ```json
@@ -121,6 +137,15 @@ Retrieve all comments for a Zendesk ticket by its ID
 
 - Input:
   - `ticket_id` (integer): The ID of the ticket to get comments for
+
+### get_ticket_attachment
+
+Fetch a ticket attachment (image or PDF) by its `content_url` (as returned by `get_ticket_comments`).
+
+- Input:
+  - `content_url` (string): The `content_url` of the attachment
+
+- Output: Images are returned as image content. PDFs are returned as extracted plain text — the embedded text layer when present, otherwise local OCR (tesseract) of the rendered pages. The text is prefixed with a short header noting page count, extraction method (`text`/`ocr`/`mixed`), and whether it was truncated. See [Setup](#setup) for OCR requirements. Only the account's own Zendesk host and Zendesk's CDN are allowed (SSRF guard); attachments are capped at 10 MB.
 
 ### create_ticket_comment
 

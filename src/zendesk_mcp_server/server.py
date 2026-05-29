@@ -228,7 +228,7 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="get_ticket_attachment",
-            description="Fetch a Zendesk ticket attachment (image or PDF) by its content_url. Images are returned as image content; PDFs and other documents are returned as an embedded resource. Use the attachment URLs returned by get_ticket_comments.",
+            description="Fetch a Zendesk ticket attachment (image or PDF) by its content_url. Images are returned as image content. PDFs are returned as extracted plain text: the embedded text layer when present, otherwise local OCR (tesseract) of the rendered pages. Use the attachment URLs returned by get_ticket_comments.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -343,24 +343,28 @@ async def handle_call_tool(
                 raise ValueError("Missing arguments")
             content_url = arguments["content_url"]
             result = zendesk_client.get_ticket_attachment(content_url)
-            content_type = result["content_type"]
-            if content_type.startswith("image/"):
+            if result["kind"] == "image":
                 return [types.ImageContent(
                     type="image",
                     data=result["data"],
-                    mimeType=content_type,
+                    mimeType=result["content_type"],
                 )]
             else:
-                # Non-image attachments (e.g. PDF) must NOT be returned as an
-                # image block — the Anthropic API only accepts png/jpeg/gif/webp
-                # there and rejects everything else. Return the raw base64 in a
-                # text block instead.
+                # PDFs are returned as extracted/OCR'd text — base64 would blow
+                # past the client's per-file size limit and isn't readable as an
+                # image. Prefix a short header so the model knows the provenance
+                # (text layer vs. OCR) and whether anything was truncated.
+                header = (
+                    f"[PDF text — pages: {result['pages_processed']}/{result['pages']}, "
+                    f"method: {result['extraction']}"
+                )
+                if result["truncated"]:
+                    header += ", truncated"
+                header += "]"
+                body = result["text"] or "(no extractable text found)"
                 return [types.TextContent(
                     type="text",
-                    text=json.dumps({
-                        "content_type": content_type,
-                        "data_base64": result["data"],
-                    })
+                    text=f"{header}\n\n{body}",
                 )]
 
         elif name == "update_ticket":

@@ -11,6 +11,11 @@ dependencies = [
     # Security floors for transitive deps used on the attachment-fetch path.
     "requests>=2.34.2",
     "urllib3>=2.7.0",
+    # PDF attachment handling: pymupdf extracts the text layer and renders
+    # pages for OCR. OCR shells out to the `tesseract` system binary (piped via
+    # stdin), which must be installed on the host along with the relevant
+    # language data (e.g. `pol`, `eng`).
+    "pymupdf>=1.27.2.3",
 ]
 
 [build-system]
