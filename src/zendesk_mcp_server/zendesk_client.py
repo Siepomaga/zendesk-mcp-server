@@ -96,11 +96,38 @@ class ZendeskClient:
     # 10 MB hard cap to guard against image bombs and token budget blowout.
     _MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 
+    def _validate_attachment_url(self, content_url: str) -> None:
+        """
+        Guard against SSRF / credential leakage.
+
+        ``content_url`` is supplied by the caller, and the request carries the
+        Zendesk Basic-auth header. Without validation an arbitrary URL (e.g. an
+        internal address or attacker-controlled host) would receive those
+        credentials. Only allow the account's own Zendesk host and Zendesk's
+        attachment CDN, over HTTPS.
+        """
+        parsed = urllib.parse.urlparse(content_url)
+
+        if parsed.scheme != 'https':
+            raise ValueError(
+                f"Attachment URL must use https, got scheme '{parsed.scheme}'."
+            )
+
+        host = (parsed.hostname or '').lower()
+        allowed = host == f"{self.subdomain}.zendesk.com" or host.endswith('.zdusercontent.com')
+        if not allowed:
+            raise ValueError(
+                f"Refusing to fetch attachment from untrusted host '{host}'. "
+                f"Only {self.subdomain}.zendesk.com and *.zdusercontent.com are allowed."
+            )
+
     def get_ticket_attachment(self, content_url: str) -> Dict[str, Any]:
         """
         Fetch an image attachment and return base64-encoded data.
 
         Security measures applied:
+        - Host allowlist on content_url so the Zendesk auth header is never sent
+          to an arbitrary/internal host (SSRF + credential-leak guard).
         - Allowlist of safe image MIME types (no SVG or arbitrary binary).
         - Magic byte validation so the file header must match the declared type.
         - 10 MB size cap to prevent image bombs and excessive token usage.
@@ -110,6 +137,7 @@ class ZendeskClient:
         which is required — the CDN returns 403 if it receives an auth header.
         """
         try:
+            self._validate_attachment_url(content_url)
             response = _requests.get(
                 content_url,
                 headers={'Authorization': self.auth_header},

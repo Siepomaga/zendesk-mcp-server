@@ -5,9 +5,12 @@ description = "A simple Zendesk MCP server"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "mcp>=1.1.2",
-    "python-dotenv>=1.0.1",
-    "zenpy>=2.0.56",
+    "mcp>=1.27.1",
+    "python-dotenv>=1.2.2",
+    "zenpy>=2.0.57",
+    # Security floors for transitive deps used on the attachment-fetch path.
+    "requests>=2.34.2",
+    "urllib3>=2.7.0",
 ]
 
 [build-system]
