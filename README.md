@@ -124,6 +124,28 @@ Fetch the latest tickets with pagination support
 
 - Output: Returns a list of tickets with essential fields including id, subject, status, priority, description, timestamps, and assignee information, along with pagination metadata
 
+### search_tickets
+
+Search tickets and return lightweight summaries for triage. Use this to find tickets by assignee, requester, status, or date range, then fetch the full details for the ones you need with `get_ticket` / `get_ticket_comments`. Backed by the Zendesk Search API.
+
+- Input (all optional):
+  - `query` (string): Advanced — a raw Zendesk search query in native syntax (e.g. `type:ticket assignee:me status:open created>2026-01-01`). When provided, the structured filters below are ignored. `type:ticket` is added automatically if no type is given.
+  - `assignee` (string): `me`/`self`/`current` (resolves to the configured account — see note below), an email, a numeric user id, a full name (e.g. `Jane Doe`), or `none` for unassigned.
+  - `requester` (string): same accepted values as `assignee`.
+  - `status` (string): one of `new`, `open`, `pending`, `hold`, `solved`, `closed`.
+  - `created_after` / `created_before` (string): date bounds (`YYYY-MM-DD` or ISO8601).
+  - `updated_after` / `updated_before` (string): date bounds (`YYYY-MM-DD` or ISO8601).
+  - `sort_by` (string): `created_at`, `updated_at`, `priority`, `status`, or `ticket_type` (defaults to `created_at`).
+  - `sort_order` (string): `asc` or `desc` (defaults to `desc`).
+  - `page` (integer): page number, 1-based (defaults to 1).
+  - `per_page` (integer): results per page, max 100 (defaults to 25).
+
+- Output: Lightweight ticket summaries (id, subject, status, priority, description, timestamps, requester/assignee ids, url), plus `count` (total matches across all pages), `resolved_assignee` and `query` (so you can confirm which account/query was used), and pagination metadata. The Search API returns at most 100 results per page and 1000 results per query.
+
+- Example — "my latest 100 tickets": `assignee="me", sort_by="created_at", sort_order="desc", per_page=100`.
+
+> **Note on "my tickets":** `assignee="me"` (also `self`/`current`) is resolved server-side to the account configured in `.env` (`ZENDESK_EMAIL`), so you can simply ask for "my tickets" without supplying an email. To search another agent's tickets, pass their email, user id, or full name explicitly.
+
 ### get_ticket
 
 Retrieve a Zendesk ticket by its ID

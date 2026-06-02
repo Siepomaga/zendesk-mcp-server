@@ -421,6 +421,157 @@ class ZendeskClient:
         except Exception as e:
             raise Exception(f"Failed to get latest tickets: {str(e)}")
 
+    # Values accepted by the Search API's sort_by parameter (anything else
+    # falls back to created_at). "relevance" is the API default but only makes
+    # sense for full-text queries, so we don't expose it as a sort target here.
+    _SEARCH_SORT_FIELDS = {"created_at", "updated_at", "priority", "status", "ticket_type"}
+
+    # Caller-facing aliases that mean "the account this server authenticates as".
+    _SELF_ALIASES = {"me", "self", "current"}
+
+    @staticmethod
+    def _quote_search_value(value: str) -> str:
+        """Wrap multi-word search values (e.g. full names) in quotes for Zendesk search."""
+        return f'"{value}"' if any(ch.isspace() for ch in value) else value
+
+    def search_tickets(
+        self,
+        query: str | None = None,
+        assignee: str | None = None,
+        requester: str | None = None,
+        status: str | None = None,
+        created_after: str | None = None,
+        created_before: str | None = None,
+        updated_after: str | None = None,
+        updated_before: str | None = None,
+        sort_by: str = "created_at",
+        sort_order: str = "desc",
+        page: int = 1,
+        per_page: int = 25,
+    ) -> Dict[str, Any]:
+        """
+        Search tickets via the Zendesk Search API (GET /api/v2/search.json).
+
+        Returns lightweight ticket summaries for triage; fetch full details for
+        the tickets you care about with get_ticket / get_ticket_comments.
+
+        Either pass a raw ``query`` (advanced Zendesk search syntax) or use the
+        structured filters below, which are combined with AND. ``assignee`` and
+        ``requester`` accept an email, numeric user id, a full name, or "none"
+        (unassigned). The special values "me"/"self"/"current" resolve to the
+        account this server is configured with (ZENDESK_EMAIL), so callers can
+        fetch "my tickets" without knowing the email.
+
+        Note: the Search API returns at most 100 results per page and 1000
+        results per query. The ``count`` field is the total number of matches.
+        """
+        try:
+            resolved_assignee = None
+
+            if query and query.strip():
+                # Advanced mode: trust the caller's query, but keep it scoped to
+                # tickets unless they already specified a type.
+                q = query.strip()
+                if "type:" not in q:
+                    q = f"type:ticket {q}"
+            else:
+                parts = ["type:ticket"]
+
+                if assignee and assignee.strip():
+                    a = assignee.strip()
+                    if a.lower() in self._SELF_ALIASES:
+                        a = self.email or a
+                    resolved_assignee = a
+                    parts.append(f"assignee:{self._quote_search_value(a)}")
+
+                if requester and requester.strip():
+                    r = requester.strip()
+                    if r.lower() in self._SELF_ALIASES:
+                        r = self.email or r
+                    parts.append(f"requester:{self._quote_search_value(r)}")
+
+                if status and status.strip():
+                    parts.append(f"status:{status.strip()}")
+
+                # Date filters use Zendesk's >/< operators (no spaces). Values
+                # are passed verbatim and accept YYYY-MM-DD or full ISO8601.
+                if created_after and created_after.strip():
+                    parts.append(f"created>{created_after.strip()}")
+                if created_before and created_before.strip():
+                    parts.append(f"created<{created_before.strip()}")
+                if updated_after and updated_after.strip():
+                    parts.append(f"updated>{updated_after.strip()}")
+                if updated_before and updated_before.strip():
+                    parts.append(f"updated<{updated_before.strip()}")
+
+                q = " ".join(parts)
+
+            # Validate sort + pagination before hitting the API.
+            if sort_by not in self._SEARCH_SORT_FIELDS:
+                sort_by = "created_at"
+            if sort_order not in ("asc", "desc"):
+                sort_order = "desc"
+            per_page = min(max(int(per_page), 1), 100)
+            page = max(int(page), 1)
+
+            params = {
+                "query": q,
+                "sort_by": sort_by,
+                "sort_order": sort_order,
+                "page": str(page),
+                "per_page": str(per_page),
+            }
+            query_string = urllib.parse.urlencode(params)
+            url = f"{self.base_url}/search.json?{query_string}"
+
+            req = urllib.request.Request(url)
+            req.add_header("Authorization", self.auth_header)
+            req.add_header("Content-Type", "application/json")
+
+            with urllib.request.urlopen(req) as response:
+                data = json.loads(response.read().decode())
+
+            results = data.get("results", [])
+
+            # With type:ticket the results are tickets; guard against any stray
+            # result types just in case the query was overridden.
+            ticket_list = []
+            for ticket in results:
+                if ticket.get("result_type") not in (None, "ticket"):
+                    continue
+                ticket_list.append({
+                    "id": ticket.get("id"),
+                    "subject": ticket.get("subject"),
+                    "status": ticket.get("status"),
+                    "priority": ticket.get("priority"),
+                    "description": ticket.get("description"),
+                    "created_at": ticket.get("created_at"),
+                    "updated_at": ticket.get("updated_at"),
+                    "requester_id": ticket.get("requester_id"),
+                    "assignee_id": ticket.get("assignee_id"),
+                    "url": ticket.get("url"),
+                })
+
+            return {
+                "tickets": ticket_list,
+                "count": data.get("count"),  # total matches, not just this page
+                "returned": len(ticket_list),
+                "page": page,
+                "per_page": per_page,
+                "sort_by": sort_by,
+                "sort_order": sort_order,
+                "query": q,  # the actual query sent (transparency / debugging)
+                "resolved_assignee": resolved_assignee,  # what "me" expanded to, if used
+                "has_more": data.get("next_page") is not None,
+                "next_page": page + 1 if data.get("next_page") else None,
+                "previous_page": page - 1 if data.get("previous_page") and page > 1 else None,
+            }
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode() if e.fp else "No response body"
+            raise Exception(f"Failed to search tickets: HTTP {e.code} - {e.reason}. {error_body}")
+        except Exception as e:
+            raise Exception(f"Failed to search tickets: {str(e)}")
+
     def get_all_articles(self) -> Dict[str, Any]:
         """
         Fetch help center articles as knowledge base.

@@ -190,6 +190,91 @@ async def handle_list_tools() -> list[types.Tool]:
             }
         ),
         types.Tool(
+            name="search_tickets",
+            description=(
+                "Search Zendesk tickets and return lightweight summaries (id, subject, "
+                "status, priority, dates, assignee_id, requester_id, url) so you can "
+                "triage results, then fetch full details for the ones you need with "
+                "get_ticket / get_ticket_comments. "
+                "To get the current user's own tickets, set assignee='me' — it resolves "
+                "server-side to this server's configured Zendesk account (ZENDESK_EMAIL), "
+                "so you do not need to know the email. You can also pass an explicit email, "
+                "numeric user id, a full name (e.g. 'Jane Doe'), or 'none' for unassigned. "
+                "Example — my latest 100 tickets: assignee='me', sort_by='created_at', "
+                "sort_order='desc', per_page=100. "
+                "The response includes 'count' (total matches across all pages), plus "
+                "'resolved_assignee' and 'query' so you can confirm which account/query was "
+                "used. The Search API returns at most 100 results per page and 1000 total."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "Advanced: raw Zendesk search query in native syntax (e.g. "
+                            "\"type:ticket assignee:me status:open created>2026-01-01\"). "
+                            "When provided, the structured filters below are ignored. "
+                            "'type:ticket' is added automatically if no type is specified."
+                        )
+                    },
+                    "assignee": {
+                        "type": "string",
+                        "description": (
+                            "Filter by assignee: 'me'/'self'/'current' (resolves to the "
+                            "configured account), an email, a numeric user id, a full name, "
+                            "or 'none' for unassigned tickets."
+                        )
+                    },
+                    "requester": {
+                        "type": "string",
+                        "description": "Filter by requester: same accepted values as assignee."
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "Filter by status (new, open, pending, hold, solved, closed)."
+                    },
+                    "created_after": {
+                        "type": "string",
+                        "description": "Only tickets created after this date (YYYY-MM-DD or ISO8601)."
+                    },
+                    "created_before": {
+                        "type": "string",
+                        "description": "Only tickets created before this date (YYYY-MM-DD or ISO8601)."
+                    },
+                    "updated_after": {
+                        "type": "string",
+                        "description": "Only tickets updated after this date (YYYY-MM-DD or ISO8601)."
+                    },
+                    "updated_before": {
+                        "type": "string",
+                        "description": "Only tickets updated before this date (YYYY-MM-DD or ISO8601)."
+                    },
+                    "sort_by": {
+                        "type": "string",
+                        "description": "Sort field: created_at, updated_at, priority, status, ticket_type",
+                        "default": "created_at"
+                    },
+                    "sort_order": {
+                        "type": "string",
+                        "description": "Sort order (asc or desc)",
+                        "default": "desc"
+                    },
+                    "page": {
+                        "type": "integer",
+                        "description": "Page number (1-based)",
+                        "default": 1
+                    },
+                    "per_page": {
+                        "type": "integer",
+                        "description": "Results per page (max 100)",
+                        "default": 25
+                    }
+                },
+                "required": []
+            }
+        ),
+        types.Tool(
             name="get_ticket_comments",
             description="Retrieve all comments for a Zendesk ticket by its ID",
             inputSchema={
@@ -312,6 +397,27 @@ async def handle_call_tool(
             return [types.TextContent(
                 type="text",
                 text=json.dumps(tickets, indent=2)
+            )]
+
+        elif name == "search_tickets":
+            arguments = arguments or {}
+            results = zendesk_client.search_tickets(
+                query=arguments.get("query"),
+                assignee=arguments.get("assignee"),
+                requester=arguments.get("requester"),
+                status=arguments.get("status"),
+                created_after=arguments.get("created_after"),
+                created_before=arguments.get("created_before"),
+                updated_after=arguments.get("updated_after"),
+                updated_before=arguments.get("updated_before"),
+                sort_by=arguments.get("sort_by", "created_at"),
+                sort_order=arguments.get("sort_order", "desc"),
+                page=arguments.get("page", 1),
+                per_page=arguments.get("per_page", 25),
+            )
+            return [types.TextContent(
+                type="text",
+                text=json.dumps(results, indent=2)
             )]
 
         elif name == "get_ticket_comments":
