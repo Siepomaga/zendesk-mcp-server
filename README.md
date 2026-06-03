@@ -140,7 +140,7 @@ Search tickets and return lightweight summaries for triage. Use this to find tic
   - `page` (integer): page number, 1-based (defaults to 1).
   - `per_page` (integer): results per page, max 100 (defaults to 25).
 
-- Output: Lightweight ticket summaries (id, subject, status, priority, description, timestamps, requester/assignee ids, url), plus `count` (total matches across all pages), `resolved_assignee` and `query` (so you can confirm which account/query was used), and pagination metadata. The Search API returns at most 100 results per page and 1000 results per query.
+- Output: Lightweight ticket summaries (id, subject, status, priority, timestamps, requester/assignee ids, url) — deliberately **without** the ticket body, so a 100-result page stays small; fetch the body per ticket with `get_ticket` / `get_ticket_comments`. Also returns `count` (total matches across all pages), `resolved_assignee` and `query` (so you can confirm which account/query was used), and pagination metadata. The Search API returns at most 100 results per page and 1000 results per query.
 
 - Example — "my latest 100 tickets": `assignee="me", sort_by="created_at", sort_order="desc", per_page=100`.
 

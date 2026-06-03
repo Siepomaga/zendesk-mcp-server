@@ -528,7 +528,10 @@ class ZendeskClient:
             req.add_header("Authorization", self.auth_header)
             req.add_header("Content-Type", "application/json")
 
-            with urllib.request.urlopen(req) as response:
+            # Bounded timeout so a stalled connection fails fast with a clear
+            # error instead of hanging the MCP call (the client gives up after
+            # minutes otherwise).
+            with urllib.request.urlopen(req, timeout=30) as response:
                 data = json.loads(response.read().decode())
 
             results = data.get("results", [])
@@ -539,12 +542,16 @@ class ZendeskClient:
             for ticket in results:
                 if ticket.get("result_type") not in (None, "ticket"):
                     continue
+                # Deliberately lightweight: no `description`. A ticket's
+                # description is its full first message (often long emails/HTML),
+                # so including it for up to 100 results bloats the payload to
+                # tens of thousands of tokens and defeats the triage purpose.
+                # Fetch the body via get_ticket / get_ticket_comments per result.
                 ticket_list.append({
                     "id": ticket.get("id"),
                     "subject": ticket.get("subject"),
                     "status": ticket.get("status"),
                     "priority": ticket.get("priority"),
-                    "description": ticket.get("description"),
                     "created_at": ticket.get("created_at"),
                     "updated_at": ticket.get("updated_at"),
                     "requester_id": ticket.get("requester_id"),
