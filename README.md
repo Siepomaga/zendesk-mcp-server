@@ -134,6 +134,7 @@ Search tickets and return lightweight summaries for triage. Use this to find tic
   - `requester` (string): same accepted values as `assignee`.
   - `cc` (string): CC/collaborator — same accepted values as `assignee`.
   - `status` (string): one of `new`, `open`, `pending`, `hold`, `solved`, `closed`.
+  - `exclude_closed` (boolean): drop `closed` tickets (defaults to true) — they need no further action. Ignored when an explicit `status` or a raw `query` is given.
   - `created_after` / `created_before` (string): creation-date bounds (`YYYY-MM-DD` or ISO8601).
   - `updated_after` / `updated_before` (string): last-activity bounds (`YYYY-MM-DD` or ISO8601).
   - `sort_by` (string): `created_at`, `updated_at`, `priority`, `status`, or `ticket_type` (defaults to `created_at`).

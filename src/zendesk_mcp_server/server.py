@@ -205,7 +205,8 @@ async def handle_list_tools() -> list[types.Tool]:
                 "cc'd to me' is TWO separate calls — one with assignee='me', one with "
                 "cc='me' — whose results you merge; do not put both in one call (that ANDs "
                 "them). Use created_after for creation date, updated_after for last "
-                "activity. Example — my tickets active in the last 14 days: assignee='me', "
+                "activity. Closed tickets are dropped by default (exclude_closed). "
+                "Example — my open work active in the last 14 days: assignee='me', "
                 "updated_after='2026-05-20', sort_by='updated_at', sort_order='desc'. "
                 "The response includes 'count' (total matches across all pages), plus "
                 "'resolved_assignee' and 'query' so you can confirm which account/query was "
@@ -246,6 +247,15 @@ async def handle_list_tools() -> list[types.Tool]:
                     "status": {
                         "type": "string",
                         "description": "Filter by status (new, open, pending, hold, solved, closed)."
+                    },
+                    "exclude_closed": {
+                        "type": "boolean",
+                        "description": (
+                            "Drop tickets in the 'closed' status (default true) since they "
+                            "need no further action. Ignored if you set an explicit status "
+                            "or pass a raw query."
+                        ),
+                        "default": True
                     },
                     "created_after": {
                         "type": "string",
@@ -430,6 +440,7 @@ async def handle_call_tool(
                 requester=arguments.get("requester"),
                 cc=arguments.get("cc"),
                 status=arguments.get("status"),
+                exclude_closed=arguments.get("exclude_closed", True),
                 created_after=arguments.get("created_after"),
                 created_before=arguments.get("created_before"),
                 updated_after=arguments.get("updated_after"),

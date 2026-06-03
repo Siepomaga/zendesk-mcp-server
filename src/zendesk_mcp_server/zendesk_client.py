@@ -441,6 +441,7 @@ class ZendeskClient:
         requester: str | None = None,
         cc: str | None = None,
         status: str | None = None,
+        exclude_closed: bool = True,
         created_after: str | None = None,
         created_before: str | None = None,
         updated_after: str | None = None,
@@ -468,6 +469,10 @@ class ZendeskClient:
         Note: Zendesk search has no OR across fields, so "assigned to me OR cc'd
         to me" is two separate searches (one with ``assignee``, one with ``cc``)
         whose results you merge — not a single call.
+
+        ``exclude_closed`` (default True) drops tickets in the "closed" status,
+        which need no further action; it's ignored when you pin an explicit
+        ``status`` or pass a raw ``query``.
 
         ``include_description`` controls whether each summary carries the ticket
         body (its first message). It's on by default because callers often need
@@ -510,8 +515,14 @@ class ZendeskClient:
                         cc_v = self.email or cc_v
                     parts.append(f"cc:{self._quote_search_value(cc_v)}")
 
-                if status and status.strip():
+                status_provided = bool(status and status.strip())
+                if status_provided:
                     parts.append(f"status:{status.strip()}")
+                elif exclude_closed:
+                    # Closed tickets need no further action, so drop them by
+                    # default. Skipped when the caller pins an explicit status
+                    # (that filter already decides what's included).
+                    parts.append("-status:closed")
 
                 # Date filters use Zendesk's >/< operators (no spaces). Values
                 # are passed verbatim and accept YYYY-MM-DD or full ISO8601.
