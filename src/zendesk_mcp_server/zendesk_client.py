@@ -439,6 +439,7 @@ class ZendeskClient:
         query: str | None = None,
         assignee: str | None = None,
         requester: str | None = None,
+        cc: str | None = None,
         status: str | None = None,
         created_after: str | None = None,
         created_before: str | None = None,
@@ -448,19 +449,32 @@ class ZendeskClient:
         sort_order: str = "desc",
         page: int = 1,
         per_page: int = 25,
+        include_description: bool = True,
+        description_max_chars: int = 2000,
     ) -> Dict[str, Any]:
         """
         Search tickets via the Zendesk Search API (GET /api/v2/search.json).
 
-        Returns lightweight ticket summaries for triage; fetch full details for
-        the tickets you care about with get_ticket / get_ticket_comments.
+        Returns ticket summaries you can analyse/triage, then fetch full details
+        for the ones you care about with get_ticket / get_ticket_comments.
 
         Either pass a raw ``query`` (advanced Zendesk search syntax) or use the
-        structured filters below, which are combined with AND. ``assignee`` and
-        ``requester`` accept an email, numeric user id, a full name, or "none"
-        (unassigned). The special values "me"/"self"/"current" resolve to the
-        account this server is configured with (ZENDESK_EMAIL), so callers can
-        fetch "my tickets" without knowing the email.
+        structured filters below, which are combined with AND. ``assignee``,
+        ``requester`` and ``cc`` accept an email, numeric user id, a full name,
+        or "none" (unassigned). The special values "me"/"self"/"current" resolve
+        to the account this server is configured with (ZENDESK_EMAIL), so callers
+        can fetch "my tickets" without knowing the email.
+
+        Note: Zendesk search has no OR across fields, so "assigned to me OR cc'd
+        to me" is two separate searches (one with ``assignee``, one with ``cc``)
+        whose results you merge — not a single call.
+
+        ``include_description`` controls whether each summary carries the ticket
+        body (its first message). It's on by default because callers often need
+        it to decide which tickets need action. ``description_max_chars`` caps
+        each body (default 2000; 0 = no cap) so a 100-result page can't balloon
+        into a huge payload — long bodies are trimmed with an "…[truncated]"
+        marker; fetch the full text per ticket with get_ticket_comments.
 
         Note: the Search API returns at most 100 results per page and 1000
         results per query. The ``count`` field is the total number of matches.
@@ -489,6 +503,12 @@ class ZendeskClient:
                     if r.lower() in self._SELF_ALIASES:
                         r = self.email or r
                     parts.append(f"requester:{self._quote_search_value(r)}")
+
+                if cc and cc.strip():
+                    cc_v = cc.strip()
+                    if cc_v.lower() in self._SELF_ALIASES:
+                        cc_v = self.email or cc_v
+                    parts.append(f"cc:{self._quote_search_value(cc_v)}")
 
                 if status and status.strip():
                     parts.append(f"status:{status.strip()}")
@@ -539,15 +559,11 @@ class ZendeskClient:
             # With type:ticket the results are tickets; guard against any stray
             # result types just in case the query was overridden.
             ticket_list = []
+            cap = max(int(description_max_chars), 0)
             for ticket in results:
                 if ticket.get("result_type") not in (None, "ticket"):
                     continue
-                # Deliberately lightweight: no `description`. A ticket's
-                # description is its full first message (often long emails/HTML),
-                # so including it for up to 100 results bloats the payload to
-                # tens of thousands of tokens and defeats the triage purpose.
-                # Fetch the body via get_ticket / get_ticket_comments per result.
-                ticket_list.append({
+                summary = {
                     "id": ticket.get("id"),
                     "subject": ticket.get("subject"),
                     "status": ticket.get("status"),
@@ -557,7 +573,16 @@ class ZendeskClient:
                     "requester_id": ticket.get("requester_id"),
                     "assignee_id": ticket.get("assignee_id"),
                     "url": ticket.get("url"),
-                })
+                }
+                if include_description:
+                    # The body (first message) is often a long email/HTML thread.
+                    # Cap it so a 100-result page can't balloon the payload;
+                    # callers fetch the full text via get_ticket_comments.
+                    desc = ticket.get("description") or ""
+                    if cap and len(desc) > cap:
+                        desc = desc[:cap] + "…[truncated]"
+                    summary["description"] = desc
+                ticket_list.append(summary)
 
             return {
                 "tickets": ticket_list,

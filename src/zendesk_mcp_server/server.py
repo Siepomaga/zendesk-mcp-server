@@ -192,16 +192,21 @@ async def handle_list_tools() -> list[types.Tool]:
         types.Tool(
             name="search_tickets",
             description=(
-                "Search Zendesk tickets and return lightweight summaries (id, subject, "
-                "status, priority, dates, assignee_id, requester_id, url) so you can "
-                "triage results, then fetch full details for the ones you need with "
-                "get_ticket / get_ticket_comments. "
+                "Search Zendesk tickets and return summaries (id, subject, status, "
+                "priority, dates, assignee_id, requester_id, url, and by default a "
+                "capped description) so you can analyse which tickets need action, then "
+                "fetch full details for the ones you need with get_ticket / "
+                "get_ticket_comments. "
                 "To get the current user's own tickets, set assignee='me' — it resolves "
                 "server-side to this server's configured Zendesk account (ZENDESK_EMAIL), "
-                "so you do not need to know the email. You can also pass an explicit email, "
-                "numeric user id, a full name (e.g. 'Jane Doe'), or 'none' for unassigned. "
-                "Example — my latest 100 tickets: assignee='me', sort_by='created_at', "
-                "sort_order='desc', per_page=100. "
+                "so you do not need to know the email. assignee/requester/cc also accept an "
+                "explicit email, numeric user id, a full name (e.g. 'Jane Doe'), or 'none'. "
+                "IMPORTANT: Zendesk search has no OR across fields, so 'assigned to me OR "
+                "cc'd to me' is TWO separate calls — one with assignee='me', one with "
+                "cc='me' — whose results you merge; do not put both in one call (that ANDs "
+                "them). Use created_after for creation date, updated_after for last "
+                "activity. Example — my tickets active in the last 14 days: assignee='me', "
+                "updated_after='2026-05-20', sort_by='updated_at', sort_order='desc'. "
                 "The response includes 'count' (total matches across all pages), plus "
                 "'resolved_assignee' and 'query' so you can confirm which account/query was "
                 "used. The Search API returns at most 100 results per page and 1000 total."
@@ -229,6 +234,14 @@ async def handle_list_tools() -> list[types.Tool]:
                     "requester": {
                         "type": "string",
                         "description": "Filter by requester: same accepted values as assignee."
+                    },
+                    "cc": {
+                        "type": "string",
+                        "description": (
+                            "Filter by CC/collaborator: same accepted values as assignee "
+                            "('me', email, id, name). Note: combine assignee and cc with "
+                            "separate calls, not in one call (Zendesk ANDs fields)."
+                        )
                     },
                     "status": {
                         "type": "string",
@@ -269,6 +282,16 @@ async def handle_list_tools() -> list[types.Tool]:
                         "type": "integer",
                         "description": "Results per page (max 100)",
                         "default": 25
+                    },
+                    "include_description": {
+                        "type": "boolean",
+                        "description": "Include each ticket's body in the summary (default true).",
+                        "default": True
+                    },
+                    "description_max_chars": {
+                        "type": "integer",
+                        "description": "Cap each description to this many chars (default 2000; 0 = no cap).",
+                        "default": 2000
                     }
                 },
                 "required": []
@@ -405,6 +428,7 @@ async def handle_call_tool(
                 query=arguments.get("query"),
                 assignee=arguments.get("assignee"),
                 requester=arguments.get("requester"),
+                cc=arguments.get("cc"),
                 status=arguments.get("status"),
                 created_after=arguments.get("created_after"),
                 created_before=arguments.get("created_before"),
@@ -414,6 +438,8 @@ async def handle_call_tool(
                 sort_order=arguments.get("sort_order", "desc"),
                 page=arguments.get("page", 1),
                 per_page=arguments.get("per_page", 25),
+                include_description=arguments.get("include_description", True),
+                description_max_chars=arguments.get("description_max_chars", 2000),
             )
             return [types.TextContent(
                 type="text",
