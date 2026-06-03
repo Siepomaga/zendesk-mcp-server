@@ -124,6 +124,36 @@ Fetch the latest tickets with pagination support
 
 - Output: Returns a list of tickets with essential fields including id, subject, status, priority, description, timestamps, and assignee information, along with pagination metadata
 
+### search_tickets
+
+Search tickets and return lightweight summaries for triage. Use this to find tickets by assignee, requester, status, or date range, then fetch the full details for the ones you need with `get_ticket` / `get_ticket_comments`. Backed by the Zendesk Search API.
+
+- Input (all optional):
+  - `query` (string): Advanced — a raw Zendesk search query in native syntax (e.g. `type:ticket assignee:me status:open created>2026-01-01`). When provided, the structured filters below are ignored. `type:ticket` is added automatically if no type is given.
+  - `assignee` (string): `me`/`self`/`current` (resolves to the configured account — see note below), an email, a numeric user id, a full name (e.g. `Jane Doe`), or `none` for unassigned.
+  - `requester` (string): same accepted values as `assignee`.
+  - `cc` (string): CC/collaborator — same accepted values as `assignee`.
+  - `status` (string): one of `new`, `open`, `pending`, `hold`, `solved`, `closed`.
+  - `exclude_closed` (boolean): drop `closed` tickets (defaults to true) — they need no further action. Ignored when an explicit `status` or a raw `query` is given.
+  - `created_after` / `created_before` (string): creation-date bounds (`YYYY-MM-DD` or ISO8601).
+  - `updated_after` / `updated_before` (string): last-activity bounds (`YYYY-MM-DD` or ISO8601).
+  - `sort_by` (string): `created_at`, `updated_at`, `priority`, `status`, or `ticket_type` (defaults to `created_at`).
+  - `sort_order` (string): `asc` or `desc` (defaults to `desc`).
+  - `page` (integer): page number, 1-based (defaults to 1).
+  - `per_page` (integer): results per page, max 100 (defaults to 25).
+  - `include_description` (boolean): include each ticket's body in the summary (defaults to true).
+  - `description_max_chars` (integer): cap each description to this many chars (defaults to 2000; `0` = no cap). Trimmed bodies end with `…[truncated]`.
+
+- Output: Ticket summaries (id, subject, status, priority, timestamps, requester/assignee ids, url, and — unless disabled — a capped `description`), plus `count` (total matches across all pages), `resolved_assignee` and `query` (so you can confirm which account/query was used), and pagination metadata. The Search API returns at most 100 results per page and 1000 results per query.
+
+- Examples:
+  - My tickets active in the last 14 days: `assignee="me", updated_after="2026-05-20", sort_by="updated_at", sort_order="desc"`.
+  - A pure id/subject list (no bodies): add `include_description=false`.
+
+> **Note on "my tickets":** `assignee="me"` (also `self`/`current`) is resolved server-side to the account configured in `.env` (`ZENDESK_EMAIL`), so you can simply ask for "my tickets" without supplying an email. To search another agent's tickets, pass their email, user id, or full name explicitly.
+>
+> **Note on "assigned OR cc'd":** Zendesk search has no OR across fields, so "assigned to me **or** I'm in CC" is **two** searches (one with `assignee="me"`, one with `cc="me"`) whose results you merge — not a single call. Putting both in one call ANDs them (tickets where you are *both* assignee and CC).
+
 ### get_ticket
 
 Retrieve a Zendesk ticket by its ID
