@@ -333,7 +333,7 @@ async def handle_list_tools() -> list[types.Tool]:
                     },
                     "comment": {
                         "type": "string",
-                        "description": "The comment text/content to add"
+                        "description": "The comment text/content to add. Plain text is converted to HTML automatically (blank lines become paragraphs, single newlines become <br>); content containing HTML tags is sent as-is."
                     },
                     "public": {
                         "type": "boolean",

@@ -1,5 +1,7 @@
 from typing import Dict, Any, List
 import os
+import re
+import html
 import json
 import shutil
 import logging
@@ -14,6 +16,25 @@ logger = logging.getLogger(__name__)
 from zenpy import Zenpy
 from zenpy.lib.api_objects import Comment
 from zenpy.lib.api_objects import Ticket as ZenpyTicket
+
+_HTML_TAG_RE = re.compile(r'</?[a-zA-Z][^>]*>')
+
+
+def _plain_text_to_html(text: str) -> str:
+    """
+    Convert plain text to HTML suitable for Zendesk's html_body.
+
+    Blank-line-separated blocks become <p> paragraphs and remaining single
+    newlines become <br>, so formatting written with \\n survives rendering.
+    Input that already contains HTML tags is passed through unchanged.
+    """
+    if _HTML_TAG_RE.search(text):
+        return text
+    paragraphs = re.split(r'\n\s*\n', text)
+    return ''.join(
+        '<p>' + html.escape(p.strip()).replace('\n', '<br>') + '</p>'
+        for p in paragraphs if p.strip()
+    )
 
 
 class ZendeskClient:
@@ -339,11 +360,15 @@ class ZendeskClient:
     def post_comment(self, ticket_id: int, comment: str, public: bool = True) -> str:
         """
         Post a comment to an existing ticket.
+
+        Plain-text comments are converted to HTML (paragraphs/<br>) so that
+        newlines are preserved in Zendesk's rendered html_body; comments that
+        already contain HTML are sent as-is.
         """
         try:
             ticket = self.client.tickets(id=ticket_id)
             ticket.comment = Comment(
-                html_body=comment,
+                html_body=_plain_text_to_html(comment),
                 public=public
             )
             self.client.tickets.update(ticket)
