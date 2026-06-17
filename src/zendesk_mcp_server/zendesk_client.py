@@ -66,12 +66,40 @@ class ZendeskClient:
         self.pdf_max_pages = int(os.environ.get("ZENDESK_PDF_MAX_PAGES", "50"))
         self.ocr_timeout = int(os.environ.get("ZENDESK_OCR_TIMEOUT", "120"))
 
+    def get_user(self, user_id: int) -> Dict[str, Any] | None:
+        """
+        Look up a Zendesk user by id via the Show User API.
+
+        Returns a small dict of identity fields (id, name, email) or ``None``
+        if the id is falsy or the lookup fails — callers use this to enrich a
+        ticket without letting a user-lookup error break ticket retrieval.
+        """
+        if not user_id:
+            return None
+        try:
+            user = self.client.users(id=user_id)
+            return {
+                'id': user.id,
+                'name': user.name,
+                'email': user.email,
+            }
+        except Exception as e:
+            logger.warning(f"Failed to look up user {user_id}: {e}")
+            return None
+
     def get_ticket(self, ticket_id: int) -> Dict[str, Any]:
         """
-        Query a ticket by its ID
+        Query a ticket by its ID.
+
+        The requester's email/name are resolved via the Show User API and
+        returned alongside ``requester_id`` so the ticket can be cross-referenced
+        against other systems (e.g. matching the requester in the siepomaga
+        database). The lookup degrades gracefully: if it fails, ``requester_email``
+        is null and ``requester_id`` is still returned.
         """
         try:
             ticket = self.client.tickets(id=ticket_id)
+            requester = self.get_user(ticket.requester_id)
             return {
                 'id': ticket.id,
                 'subject': ticket.subject,
@@ -81,6 +109,8 @@ class ZendeskClient:
                 'created_at': str(ticket.created_at),
                 'updated_at': str(ticket.updated_at),
                 'requester_id': ticket.requester_id,
+                'requester_email': requester['email'] if requester else None,
+                'requester_name': requester['name'] if requester else None,
                 'assignee_id': ticket.assignee_id,
                 'organization_id': ticket.organization_id
             }

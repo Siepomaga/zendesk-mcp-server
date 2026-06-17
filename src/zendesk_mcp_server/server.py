@@ -129,7 +129,7 @@ async def handle_list_tools() -> list[types.Tool]:
     return [
         types.Tool(
             name="get_ticket",
-            description="Retrieve a Zendesk ticket by its ID",
+            description="Retrieve a Zendesk ticket by its ID. Includes the requester's email and name (resolved via the Show User API) alongside requester_id, so the requester can be cross-referenced against other systems.",
             inputSchema={
                 "type": "object",
                 "properties": {
