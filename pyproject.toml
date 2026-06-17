@@ -11,6 +11,13 @@ dependencies = [
     # Security floors for transitive deps used on the attachment-fetch path.
     "requests>=2.34.2",
     "urllib3>=2.7.0",
+    # Security floors for transitive deps pulled in via mcp/zenpy (Dependabot):
+    # starlette form-parsing DoS + URL-host poisoning, python-multipart
+    # parameter smuggling / quadratic parsing DoS, and the OpenSSL CVE bundled
+    # in older cryptography wheels.
+    "starlette>=1.3.1",
+    "python-multipart>=0.0.31",
+    "cryptography>=48.0.1",
     # PDF attachment handling: pymupdf extracts the text layer and renders
     # pages for OCR. OCR shells out to the `tesseract` system binary (piped via
     # stdin), which must be installed on the host along with the relevant
