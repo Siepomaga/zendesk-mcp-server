@@ -23,6 +23,15 @@ dependencies = [
     # stdin), which must be installed on the host along with the relevant
     # language data (e.g. `pol`, `eng`).
     "pymupdf>=1.27.2.3",
+    # Cross-process lock around the OAuth token store, so two MCP processes
+    # cannot spend the same (rotating) refresh token concurrently.
+    "filelock>=3.16.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.4",
+    "responses>=0.25.3",
 ]
 
 [build-system]
@@ -31,3 +40,7 @@ build-backend = "hatchling.build"
 
 [project.scripts]
 zendesk = "zendesk_mcp_server:main"
+zendesk-auth = "zendesk_mcp_server.auth_cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
