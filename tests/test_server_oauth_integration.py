@@ -306,9 +306,19 @@ def test_search_tickets_falls_back_to_native_me_when_lookup_fails(oauth_server):
         json={"results": [], "count": 0, "next_page": None},
     )
 
+    responses.add(
+        responses.GET,
+        f"{API}/search.json",
+        json={"results": [], "count": 0, "next_page": None},
+    )
+
     body = payload_of(call_tool(oauth_server, "search_tickets", {"requester": "me"}))
+    payload_of(call_tool(oauth_server, "search_tickets", {"assignee": "me"}))
 
     assert body["query"] == "type:ticket requester:me -status:closed"
+    # The failed lookup is cached; it is not repeated on every search.
+    me_lookups = [c for c in responses.calls if c.request.url.endswith("/users/me.json")]
+    assert len(me_lookups) == 1
 
 
 @responses.activate

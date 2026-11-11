@@ -307,3 +307,25 @@ class TestReactiveRetry:
         assert response.status_code == 401
         attempts = [c for c in responses.calls if c.request.url.startswith(TICKETS_URL)]
         assert len(attempts) == 2
+
+
+    @responses.activate
+    def test_invalid_token_401_on_a_request_without_a_bearer_is_not_retried(self, settings, store):
+        """
+        After a cross-origin redirect requests has stripped Authorization; the
+        hook must not re-add the token for that host.
+        """
+        stored_tokens(store)
+        client = ZendeskClient(subdomain=SUBDOMAIN, auth=OAuthAuthProvider(settings, store=store))
+        attachment = "https://example.zendesk.com/attachments/token/abc/?name=x.png"
+        cdn = "https://example.zdusercontent.com/attachment/abc/x.png"
+        responses.add(responses.GET, attachment, status=302, headers={"Location": cdn})
+        responses.add(responses.GET, cdn, json=INVALID_TOKEN_BODY, status=401)
+
+        response = client.session.get(attachment)
+
+        assert response.status_code == 401
+        cdn_calls = [c for c in responses.calls if c.request.url.startswith(cdn)]
+        assert len(cdn_calls) == 1
+        assert "Authorization" not in cdn_calls[0].request.headers
+        assert not [c for c in responses.calls if c.request.url.startswith(TOKEN_URL)]

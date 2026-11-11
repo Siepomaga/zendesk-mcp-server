@@ -102,6 +102,22 @@ def test_attachment_redirect_to_cdn_drops_the_authorization_header(client):
 
 
 @responses.activate
+def test_direct_cdn_attachment_url_is_fetched_without_credentials(client):
+    responses.add(
+        responses.GET,
+        CDN_URL,
+        body=PNG_MAGIC + b"payload",
+        content_type="image/png",
+        status=200,
+    )
+
+    result = client.get_ticket_attachment(CDN_URL)
+
+    assert result["content_type"] == "image/png"
+    assert "Authorization" not in responses.calls[0].request.headers
+
+
+@responses.activate
 def test_get_tickets_sends_the_auth_header_and_query(client):
     responses.add(
         responses.GET,

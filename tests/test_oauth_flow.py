@@ -399,3 +399,32 @@ def test_loopback_times_out_without_a_redirect(monkeypatch, tmp_path):
 
     with pytest.raises(AuthorizationError, match="No redirect received"):
         auth_cli._receive_code_via_loopback(settings, "https://example.zendesk.com/auth")
+
+
+@responses.activate
+def test_cli_reports_token_store_failures_without_a_traceback(monkeypatch, capsys, tmp_path):
+    """An unwritable store or lock timeout must end in a readable error."""
+    from zendesk_mcp_server.tokens import TokenStore, TokenStoreError
+
+    monkeypatch.setenv("ZENDESK_SUBDOMAIN", SUBDOMAIN)
+    monkeypatch.setenv("ZENDESK_CLIENT_ID", CLIENT_ID)
+    monkeypatch.setenv("ZENDESK_TOKEN_FILE", str(tmp_path / "tokens.json"))
+    responses.add(
+        responses.POST,
+        TOKEN_URL,
+        json={"access_token": "cli-access", "refresh_token": "cli-refresh", "expires_in": 1800},
+        status=200,
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: "bare-code")
+
+    def failing_save(self, tokens):
+        raise TokenStoreError("Could not write /nowhere/tokens.json: Permission denied")
+
+    monkeypatch.setattr(TokenStore, "save", failing_save)
+
+    exit_code = auth_cli.main(["--manual"])
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "error: Could not write /nowhere/tokens.json" in err
+    assert "Traceback" not in err

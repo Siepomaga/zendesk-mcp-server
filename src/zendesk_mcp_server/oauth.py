@@ -350,11 +350,20 @@ class OAuthAuthProvider(_HeaderAuthProvider):
         requests response hook that retries once after an expired-token 401.
 
         Follows the same resend pattern as requests' own auth handlers.
+
+        Only a request that actually carried a bearer token is retried. requests
+        strips ``Authorization`` when following a cross-origin redirect (e.g. an
+        attachment redirecting to Zendesk's CDN); re-adding a token to such a
+        request would leak it to a host it was deliberately withheld from.
         """
         if response.status_code != 401 or not _is_invalid_token(response):
             return response
 
         request = response.request
+        rejected_token = _bearer_token(request.headers.get("Authorization"))
+        if rejected_token is None:
+            return response
+
         if getattr(request, "_zendesk_oauth_retried", False):
             logger.warning(
                 "Zendesk still reports an invalid token after refreshing; not retrying again."
@@ -369,7 +378,7 @@ class OAuthAuthProvider(_HeaderAuthProvider):
         refreshed_request._zendesk_oauth_retried = True
         self._renew(
             reason="Zendesk reported the access token as invalid",
-            rejected_token=_bearer_token(request.headers.get("Authorization")),
+            rejected_token=rejected_token,
         )
         refreshed_request.headers["Authorization"] = self.auth_header()
 

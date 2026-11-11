@@ -204,6 +204,11 @@ class TokenStore:
                 f"Token store at {self.path} is not valid JSON. Re-run zendesk-auth "
                 "to recreate it."
             ) from exc
+        if not isinstance(data, dict):
+            raise TokenStoreError(
+                f"Token store at {self.path} does not contain a JSON object. Re-run "
+                "zendesk-auth to recreate it."
+            )
 
         return TokenSet.from_dict(data)
 

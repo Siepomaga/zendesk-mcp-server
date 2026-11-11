@@ -37,7 +37,7 @@ from zendesk_mcp_server.oauth import (
     generate_pkce_pair,
     generate_state,
 )
-from zendesk_mcp_server.tokens import TokenSet, TokenStore
+from zendesk_mcp_server.tokens import TokenSet, TokenStore, TokenStoreError
 
 logger = logging.getLogger("zendesk-auth")
 
@@ -243,7 +243,7 @@ def main(argv: list[str] | None = None) -> int:
         tokens = exchange_authorization_code(settings, code=code, pkce=pkce)
         with store.locked():
             store.save(tokens)
-    except (AuthorizationError, OAuthError) as exc:
+    except (AuthorizationError, OAuthError, TokenStoreError) as exc:
         print(f"\nerror: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

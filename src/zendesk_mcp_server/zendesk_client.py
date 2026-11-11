@@ -64,6 +64,7 @@ class ZendeskClient:
         self.base_url = f"https://{subdomain}.zendesk.com/api/v2"
         # Email of the signed-in user, resolved lazily via /users/me.json.
         self._current_user_email: str | None = None
+        self._current_user_looked_up = False
 
         # OCR config (used when a PDF has no usable text layer). Configurable
         # via env so deployments can adjust without code changes.
@@ -110,14 +111,17 @@ class ZendeskClient:
 
         Used to expand the "me" alias in search filters. Returns ``None`` when
         the lookup fails, in which case callers fall back to Zendesk's own
-        ``me`` keyword.
+        ``me`` keyword. A failure is cached too: the fallback targets the same
+        user, so retrying (e.g. without the users:read scope) would only add a
+        failing request to every search.
         """
-        if self._current_user_email is None:
+        if not self._current_user_looked_up:
             try:
                 user = self._api_get("users/me.json").get("user") or {}
                 self._current_user_email = user.get("email") or None
             except Exception as e:
                 logger.warning(f"Failed to look up the signed-in Zendesk user: {e}")
+            self._current_user_looked_up = True
         return self._current_user_email
 
     def get_user(self, user_id: int) -> Dict[str, Any] | None:
@@ -235,10 +239,10 @@ class ZendeskClient:
         """
         Guard against SSRF / credential leakage.
 
-        ``content_url`` is supplied by the caller, and the request carries the
-        Zendesk OAuth bearer token. Without validation an arbitrary URL (e.g. an
-        internal address or attacker-controlled host) would receive those
-        credentials. Only allow the account's own Zendesk host and Zendesk's
+        ``content_url`` is supplied by the caller, and requests to the account
+        host carry the Zendesk OAuth bearer token. Without validation an
+        arbitrary URL (e.g. an internal address or attacker-controlled host)
+        could be fetched or receive those credentials. Only allow the account's own Zendesk host and Zendesk's
         attachment CDN, over HTTPS.
         """
         parsed = urllib.parse.urlparse(content_url)
@@ -274,8 +278,10 @@ class ZendeskClient:
                     'pages': <int>, 'pages_processed': <int>, 'truncated': bool}``
 
         Security measures applied:
-        - Host allowlist on content_url so the Zendesk auth header is never sent
-          to an arbitrary/internal host (SSRF + credential-leak guard).
+        - Host allowlist on content_url so the request never goes to an
+          arbitrary/internal host (SSRF guard).
+        - The OAuth token is only sent to the account's own Zendesk host; CDN
+          URLs are fetched without credentials (credential-leak guard).
         - Allowlist of safe MIME types (images + PDF; no SVG or arbitrary binary).
         - Magic byte validation so the file header must match the declared type.
         - 10 MB size cap to prevent file bombs and excessive token usage.
@@ -288,11 +294,21 @@ class ZendeskClient:
         """
         try:
             self._validate_attachment_url(content_url)
-            response = self.session.get(
-                content_url,
-                timeout=_API_TIMEOUT_SECONDS,
-                stream=True,
-            )
+            host = (urllib.parse.urlparse(content_url).hostname or '').lower()
+            if host == f"{self.subdomain}.zendesk.com":
+                response = self.session.get(
+                    content_url,
+                    timeout=_API_TIMEOUT_SECONDS,
+                    stream=True,
+                )
+            else:
+                # A *.zdusercontent.com URL is pre-signed and needs no
+                # credentials; sending the bearer token there would leak it.
+                response = _requests.get(
+                    content_url,
+                    timeout=_API_TIMEOUT_SECONDS,
+                    stream=True,
+                )
             response.raise_for_status()
 
             content_type = response.headers.get('Content-Type', '').split(';')[0].strip().lower()

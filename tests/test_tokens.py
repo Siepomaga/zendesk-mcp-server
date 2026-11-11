@@ -93,6 +93,15 @@ def test_corrupt_json_is_reported_clearly(store):
         store.load()
 
 
+@pytest.mark.parametrize("payload", ["[]", '"token"', "null", "42"])
+def test_non_object_json_is_reported_clearly(store, payload):
+    store.save(make_tokens())
+    store.path.write_text(payload, encoding="utf-8")
+
+    with pytest.raises(TokenStoreError, match="does not contain a JSON object"):
+        store.load()
+
+
 def test_missing_field_is_reported_clearly(store):
     store.save(make_tokens())
     data = json.loads(store.path.read_text(encoding="utf-8"))
