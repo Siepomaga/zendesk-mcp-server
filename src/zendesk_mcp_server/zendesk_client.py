@@ -2,20 +2,25 @@ from typing import Dict, Any, List
 import os
 import re
 import html
-import json
 import shutil
 import logging
 import subprocess
-import urllib.request
 import urllib.parse
 import base64
 import requests as _requests
-
-logger = logging.getLogger(__name__)
+from requests.adapters import HTTPAdapter
 
 from zenpy import Zenpy
 from zenpy.lib.api_objects import Comment
 from zenpy.lib.api_objects import Ticket as ZenpyTicket
+
+from zendesk_mcp_server.auth import AuthProvider
+
+logger = logging.getLogger(__name__)
+
+# Bounded timeout for direct API calls, so a stalled connection fails fast with
+# a clear error instead of hanging the MCP call.
+_API_TIMEOUT_SECONDS = 30
 
 _HTML_TAG_RE = re.compile(r'</?[a-zA-Z][^>]*>')
 
@@ -38,25 +43,27 @@ def _plain_text_to_html(text: str) -> str:
 
 
 class ZendeskClient:
-    def __init__(self, subdomain: str, email: str, token: str):
+    def __init__(self, subdomain: str, auth: AuthProvider):
         """
         Initialize the Zendesk client using zenpy lib and direct API.
+
+        Authentication is supplied by an AuthProvider (OAuth in practice). The
+        provider is attached to a single requests Session that is shared with
+        zenpy. Because requests invokes a session's auth callable on every
+        request, an expiring OAuth token is refreshed transparently for zenpy
+        calls and direct calls alike.
         """
-        self.client = Zenpy(
-            subdomain=subdomain,
-            email=email,
-            token=token
-        )
+        self.auth = auth
+        self.session = self._build_session(auth)
+        # zenpy skips its own authentication when the session it is handed
+        # reports being already authorized, which leaves our provider in charge.
+        self.client = Zenpy(subdomain=subdomain, session=self.session)
 
         # For direct API calls
         self.subdomain = subdomain
-        self.email = email
-        self.token = token
         self.base_url = f"https://{subdomain}.zendesk.com/api/v2"
-        # Create basic auth header
-        credentials = f"{email}/token:{token}"
-        encoded_credentials = base64.b64encode(credentials.encode()).decode('ascii')
-        self.auth_header = f"Basic {encoded_credentials}"
+        # Email of the signed-in user, resolved lazily via /users/me.json.
+        self._current_user_email: str | None = None
 
         # OCR config (used when a PDF has no usable text layer). Configurable
         # via env so deployments can adjust without code changes.
@@ -65,6 +72,53 @@ class ZendeskClient:
         self.ocr_dpi = int(os.environ.get("ZENDESK_OCR_DPI", "300"))
         self.pdf_max_pages = int(os.environ.get("ZENDESK_PDF_MAX_PAGES", "50"))
         self.ocr_timeout = int(os.environ.get("ZENDESK_OCR_TIMEOUT", "120"))
+
+    @staticmethod
+    def _build_session(auth: AuthProvider) -> _requests.Session:
+        session = _requests.Session()
+        # zenpy only mounts its retrying adapter on sessions it creates itself,
+        # so mount it here to keep the same retry behaviour.
+        session.mount("https://", HTTPAdapter(**Zenpy.http_adapter_kwargs()))
+        session.auth = auth
+        session.authorized = True
+        # Providers holding expiring credentials opt into retrying a request once
+        # after the credential is rejected mid-flight.
+        response_hook = getattr(auth, "response_hook", None)
+        if response_hook is not None:
+            session.hooks["response"].append(response_hook)
+        return session
+
+    def _api_get(self, path: str, params: Dict[str, str] | None = None) -> Dict[str, Any]:
+        """
+        GET a Zendesk API endpoint through the authenticated session.
+
+        HTTP errors are re-raised with the status and response body included,
+        since Zendesk explains scope/permission failures in the body.
+        """
+        response = self.session.get(
+            f"{self.base_url}/{path}", params=params, timeout=_API_TIMEOUT_SECONDS
+        )
+        if response.status_code >= 400:
+            raise Exception(
+                f"HTTP {response.status_code} - {response.reason}. {response.text}"
+            )
+        return response.json()
+
+    def current_user_email(self) -> str | None:
+        """
+        Email of the user the OAuth token belongs to, cached after first lookup.
+
+        Used to expand the "me" alias in search filters. Returns ``None`` when
+        the lookup fails, in which case callers fall back to Zendesk's own
+        ``me`` keyword.
+        """
+        if self._current_user_email is None:
+            try:
+                user = self._api_get("users/me.json").get("user") or {}
+                self._current_user_email = user.get("email") or None
+            except Exception as e:
+                logger.warning(f"Failed to look up the signed-in Zendesk user: {e}")
+        return self._current_user_email
 
     def get_user(self, user_id: int) -> Dict[str, Any] | None:
         """
@@ -182,7 +236,7 @@ class ZendeskClient:
         Guard against SSRF / credential leakage.
 
         ``content_url`` is supplied by the caller, and the request carries the
-        Zendesk Basic-auth header. Without validation an arbitrary URL (e.g. an
+        Zendesk OAuth bearer token. Without validation an arbitrary URL (e.g. an
         internal address or attacker-controlled host) would receive those
         credentials. Only allow the account's own Zendesk host and Zendesk's
         attachment CDN, over HTTPS.
@@ -229,13 +283,14 @@ class ZendeskClient:
         Zendesk attachment URLs redirect to zdusercontent.com (Zendesk's CDN).
         requests strips the Authorization header on cross-origin redirects,
         which is required — the CDN returns 403 if it receives an auth header.
+        The session's auth callable is applied when the request is prepared and
+        is not reapplied by requests on redirect, so this still holds.
         """
         try:
             self._validate_attachment_url(content_url)
-            response = _requests.get(
+            response = self.session.get(
                 content_url,
-                headers={'Authorization': self.auth_header},
-                timeout=30,
+                timeout=_API_TIMEOUT_SECONDS,
                 stream=True,
             )
             response.raise_for_status()
@@ -423,24 +478,13 @@ class ZendeskClient:
             # Cap at reasonable limit
             per_page = min(per_page, 100)
 
-            # Build URL with parameters for offset pagination
-            params = {
+            # Offset pagination parameters
+            data = self._api_get('tickets.json', params={
                 'page': str(page),
                 'per_page': str(per_page),
                 'sort_by': sort_by,
                 'sort_order': sort_order
-            }
-            query_string = urllib.parse.urlencode(params)
-            url = f"{self.base_url}/tickets.json?{query_string}"
-
-            # Create request with auth header
-            req = urllib.request.Request(url)
-            req.add_header('Authorization', self.auth_header)
-            req.add_header('Content-Type', 'application/json')
-
-            # Make the API request
-            with urllib.request.urlopen(req) as response:
-                data = json.loads(response.read().decode())
+            })
 
             tickets_data = data.get('tickets', [])
 
@@ -470,9 +514,6 @@ class ZendeskClient:
                 'next_page': page + 1 if data.get('next_page') else None,
                 'previous_page': page - 1 if data.get('previous_page') and page > 1 else None
             }
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode() if e.fp else "No response body"
-            raise Exception(f"Failed to get latest tickets: HTTP {e.code} - {e.reason}. {error_body}")
         except Exception as e:
             raise Exception(f"Failed to get latest tickets: {str(e)}")
 
@@ -488,6 +529,17 @@ class ZendeskClient:
     def _quote_search_value(value: str) -> str:
         """Wrap multi-word search values (e.g. full names) in quotes for Zendesk search."""
         return f'"{value}"' if any(ch.isspace() for ch in value) else value
+
+    def _resolve_self_alias(self, value: str) -> str:
+        """
+        Expand "me"/"self"/"current" to the signed-in user's email.
+
+        Falls back to Zendesk's native ``me`` search keyword if the user lookup
+        fails, so the filter still targets the token's owner.
+        """
+        if value.lower() not in self._SELF_ALIASES:
+            return value
+        return self.current_user_email() or "me"
 
     def search_tickets(
         self,
@@ -518,8 +570,9 @@ class ZendeskClient:
         structured filters below, which are combined with AND. ``assignee``,
         ``requester`` and ``cc`` accept an email, numeric user id, a full name,
         or "none" (unassigned). The special values "me"/"self"/"current" resolve
-        to the account this server is configured with (ZENDESK_EMAIL), so callers
-        can fetch "my tickets" without knowing the email.
+        to the user who authorized this server via OAuth (looked up through
+        /users/me.json), so callers can fetch "my tickets" without knowing the
+        email.
 
         Note: Zendesk search has no OR across fields, so "assigned to me OR cc'd
         to me" is two separate searches (one with ``assignee``, one with ``cc``)
@@ -552,22 +605,16 @@ class ZendeskClient:
                 parts = ["type:ticket"]
 
                 if assignee and assignee.strip():
-                    a = assignee.strip()
-                    if a.lower() in self._SELF_ALIASES:
-                        a = self.email or a
+                    a = self._resolve_self_alias(assignee.strip())
                     resolved_assignee = a
                     parts.append(f"assignee:{self._quote_search_value(a)}")
 
                 if requester and requester.strip():
-                    r = requester.strip()
-                    if r.lower() in self._SELF_ALIASES:
-                        r = self.email or r
+                    r = self._resolve_self_alias(requester.strip())
                     parts.append(f"requester:{self._quote_search_value(r)}")
 
                 if cc and cc.strip():
-                    cc_v = cc.strip()
-                    if cc_v.lower() in self._SELF_ALIASES:
-                        cc_v = self.email or cc_v
+                    cc_v = self._resolve_self_alias(cc.strip())
                     parts.append(f"cc:{self._quote_search_value(cc_v)}")
 
                 status_provided = bool(status and status.strip())
@@ -600,25 +647,13 @@ class ZendeskClient:
             per_page = min(max(int(per_page), 1), 100)
             page = max(int(page), 1)
 
-            params = {
+            data = self._api_get("search.json", params={
                 "query": q,
                 "sort_by": sort_by,
                 "sort_order": sort_order,
                 "page": str(page),
                 "per_page": str(per_page),
-            }
-            query_string = urllib.parse.urlencode(params)
-            url = f"{self.base_url}/search.json?{query_string}"
-
-            req = urllib.request.Request(url)
-            req.add_header("Authorization", self.auth_header)
-            req.add_header("Content-Type", "application/json")
-
-            # Bounded timeout so a stalled connection fails fast with a clear
-            # error instead of hanging the MCP call (the client gives up after
-            # minutes otherwise).
-            with urllib.request.urlopen(req, timeout=30) as response:
-                data = json.loads(response.read().decode())
+            })
 
             results = data.get("results", [])
 
@@ -664,9 +699,6 @@ class ZendeskClient:
                 "next_page": page + 1 if data.get("next_page") else None,
                 "previous_page": page - 1 if data.get("previous_page") and page > 1 else None,
             }
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode() if e.fp else "No response body"
-            raise Exception(f"Failed to search tickets: HTTP {e.code} - {e.reason}. {error_body}")
         except Exception as e:
             raise Exception(f"Failed to search tickets: {str(e)}")
 
