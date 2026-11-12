@@ -13,10 +13,45 @@ This server provides a comprehensive integration with Zendesk. It offers:
 
 ![demo](https://res.cloudinary.com/leecy-me/image/upload/v1736410626/open/zendesk_yunczu.gif)
 
+## Quick start
+
+1. **Install:** `uv venv && uv pip install -e .` (or `uv sync`).
+2. **Get an OAuth client ID** from a Zendesk admin — see
+   [Register a public OAuth client](#1-register-a-public-oauth-client-zendesk-admin-once-per-account).
+   One client serves the whole Zendesk account; every operator reuses it.
+3. **Configure:** copy `.env.example` to `.env` and set `ZENDESK_SUBDOMAIN` and
+   `ZENDESK_CLIENT_ID`.
+4. **Authorize once:** `uv run zendesk-auth` — a browser opens, you sign in to
+   Zendesk and approve access. Tokens are stored in
+   `~/.config/zendesk-mcp/tokens.json` and renewed automatically from then on.
+5. **Add the server to your MCP client**, e.g. Claude Desktop:
+
+   ```json
+   {
+     "mcpServers": {
+       "zendesk": {
+         "command": "uv",
+         "args": [
+           "--directory",
+           "/path/to/zendesk-mcp-server",
+           "run",
+           "zendesk"
+         ]
+       }
+     }
+   }
+   ```
+
+   or Claude Code:
+
+   ```bash
+   claude mcp add zendesk -- uv --directory /path/to/zendesk-mcp-server run zendesk
+   ```
+
+Already using an API token? See [Migrating from an API token](#migrating-from-an-api-token).
+
 ## Setup
 
-- build: `uv venv && uv pip install -e .` or `uv build` in short.
-- configure authentication (OAuth): see [Authentication](#authentication) below.
 - **OCR (optional, for scanned PDFs):** PDF attachments are returned as
   extracted text. When a PDF has a text layer it is used directly; otherwise the
   server falls back to OCR, which requires the `tesseract` binary and the
@@ -33,24 +68,6 @@ This server provides a comprehensive integration with Zendesk. It offers:
   | `ZENDESK_OCR_TIMEOUT` | `120` | Per-page OCR timeout (seconds) |
   | `ZENDESK_TESSERACT_CMD` | `tesseract` | Path to the tesseract binary |
 
-- configure in Claude desktop:
-
-```json
-{
-  "mcpServers": {
-      "zendesk": {
-          "command": "uv",
-          "args": [
-              "--directory",
-              "/path/to/zendesk-mcp-server",
-              "run",
-              "zendesk"
-          ]
-      }
-  }
-}
-```
-
 ## Authentication
 
 This server authenticates with OAuth (authorization code flow with PKCE). Each
@@ -61,8 +78,18 @@ are authored by them.
 
 API-token authentication (`ZENDESK_EMAIL` + `ZENDESK_API_KEY`) is **not
 supported**: Zendesk blocked creating new API tokens on 2026-10-27 and stops
-accepting all of them on 2027-04-30. If those variables are still in your
-`.env`, the server refuses to start a session and tells you to migrate.
+accepting all of them on 2027-04-30. If only those variables are set, the server
+still starts, but every tool call returns an error explaining how to migrate.
+
+In short, the flow is:
+
+1. A Zendesk admin registers one **public** OAuth client for the account.
+2. Each operator runs `zendesk-auth` once. It opens Zendesk's consent page in the
+   browser, receives the authorization code on `http://localhost:4567/callback`,
+   and exchanges it — together with the PKCE verifier — for an access token and a
+   refresh token.
+3. The MCP server reads the stored tokens, sends `Authorization: Bearer …` on
+   every Zendesk request, and renews the token pair on its own.
 
 ### 1. Register a public OAuth client (Zendesk admin, once per account)
 
@@ -109,9 +136,14 @@ uv run zendesk-auth
 ```
 
 This opens a browser, asks you to approve access, and stores the resulting
-tokens locally. From then on the server renews access on its own; you only
-repeat this if the tokens are revoked or left unused past the refresh token's
-lifetime (90 days).
+tokens locally. It then prints where the tokens were stored, the scope Zendesk
+granted, and how long the tokens are valid. From then on the server renews
+access on its own. Each renewal starts a fresh 90-day refresh-token lifetime, so
+you only repeat this if the tokens are revoked or the server goes unused for
+90 days.
+
+Run `zendesk-auth` from the project directory (or via `uv --directory …`): it
+reads `.env` from the current working directory.
 
 If the browser cannot reach this machine — a remote shell, or an OAuth client
 registered with `https://localhost` — use the paste-based flow instead:
@@ -162,6 +194,58 @@ Scopes are a ceiling, not a grant: a token can never do more than the
 authorizing operator is allowed to do. Zendesk accepts unrecognised scope names
 when issuing a token but then rejects every request with `403`, so
 `zendesk-auth` prints the scope Zendesk actually granted for comparison.
+
+### Re-authorizing, switching accounts, revoking
+
+- **Re-authorize** (expired/revoked tokens, changed scopes, different Zendesk
+  user): run `uv run zendesk-auth` again. It overwrites the stored tokens; no
+  need to delete anything first. Restart the MCP server afterwards so it drops
+  any token it had in memory.
+- **Sign out of this machine:** delete `~/.config/zendesk-mcp/tokens.json`.
+- **Revoke access server-side:** a Zendesk admin can revoke the operator's
+  OAuth tokens in Admin Center; the server then fails with a message asking to
+  re-run `zendesk-auth`.
+
+### Migrating from an API token
+
+1. Ask a Zendesk admin for the OAuth client identifier (or create the client —
+   [step 1](#1-register-a-public-oauth-client-zendesk-admin-once-per-account)).
+2. In `.env`, add `ZENDESK_CLIENT_ID=…` and remove `ZENDESK_EMAIL` and
+   `ZENDESK_API_KEY` (leftovers are ignored once `ZENDESK_CLIENT_ID` is set).
+3. Run `uv run zendesk-auth` and restart your MCP client.
+
+What changes for you: requests are now made **as you**, with your own Zendesk
+role and group permissions — no longer as whichever user owned the API token.
+Comments and ticket updates are attributed to you, and `search_tickets` with
+`assignee="me"` means the user who ran `zendesk-auth`.
+
+### Security notes
+
+- Tokens live only in the token file (`0600`, directory `0700`); they are never
+  written to logs, printed by `zendesk-auth`, or shown in tracebacks.
+- The bearer token is sent only to `https://{ZENDESK_SUBDOMAIN}.zendesk.com`.
+  Attachments served from Zendesk's CDN (`*.zdusercontent.com`) are pre-signed
+  and fetched without credentials, including after a redirect.
+- `zendesk-auth` verifies the OAuth `state` value and uses PKCE (S256), so an
+  intercepted authorization code cannot be redeemed by anyone else.
+- There is no client secret anywhere: the OAuth client is public by design.
+
+### Troubleshooting
+
+| Message / symptom | Cause and fix |
+| --- | --- |
+| `ZENDESK_CLIENT_ID is not set` | Add the OAuth client identifier to `.env`. |
+| `API-token authentication is no longer supported` | Only `ZENDESK_EMAIL`/`ZENDESK_API_KEY` are set — [migrate](#migrating-from-an-api-token). |
+| `No Zendesk OAuth tokens found at …` | This machine was never authorized, or `ZENDESK_TOKEN_FILE` points elsewhere. Run `uv run zendesk-auth`. |
+| `… refresh token is missing or expired …` / `invalid_grant` | Tokens were revoked or unused for 90 days. Run `uv run zendesk-auth`. |
+| `invalid_scope` during `zendesk-auth` | `ZENDESK_OAUTH_SCOPES` asks for more than the client's **Allowed scopes**. Widen them in Admin Center or narrow the variable. |
+| `Could not listen on localhost:4567` | The port is taken. Free it, or register another redirect URL and set `ZENDESK_OAUTH_REDIRECT_URI`, or use `zendesk-auth --manual`. |
+| `No redirect received within 180s` | Approval wasn't completed in time (Zendesk codes expire after 120 s), or the browser can't reach this machine. Re-run, or use `--manual`. |
+| Zendesk shows a redirect URI error | `ZENDESK_OAUTH_REDIRECT_URI` must exactly match a redirect URL registered on the client. |
+| Warning: `Zendesk issued no refresh token` | The token cannot be renewed and you'll have to re-run `zendesk-auth` when it expires. Check the OAuth client configuration with your admin. |
+| Warning: `Stored tokens belong to subdomain …` / `different OAuth client` | `.env` changed after authorizing. Run `uv run zendesk-auth` again. |
+| `Timed out after 30s waiting for the token store lock` | Another server process is stuck holding the lock. If no other Zendesk MCP server is running, delete `tokens.json.lock` next to the token file. |
+| Tool returns HTTP `403` | Your Zendesk role can't access that ticket/resource, or the scope is missing. This is reported as-is and never triggers a token refresh. |
 
 ## Docker
 
@@ -263,7 +347,7 @@ Search tickets and return lightweight summaries for triage. Use this to find tic
 
 - Input (all optional):
   - `query` (string): Advanced — a raw Zendesk search query in native syntax (e.g. `type:ticket assignee:me status:open created>2026-01-01`). When provided, the structured filters below are ignored. `type:ticket` is added automatically if no type is given.
-  - `assignee` (string): `me`/`self`/`current` (resolves to the configured account — see note below), an email, a numeric user id, a full name (e.g. `Jane Doe`), or `none` for unassigned.
+  - `assignee` (string): `me`/`self`/`current` (resolves to the user who ran `zendesk-auth` — see note below), an email, a numeric user id, a full name (e.g. `Jane Doe`), or `none` for unassigned.
   - `requester` (string): same accepted values as `assignee`.
   - `cc` (string): CC/collaborator — same accepted values as `assignee`.
   - `status` (string): one of `new`, `open`, `pending`, `hold`, `solved`, `closed`.
@@ -283,7 +367,7 @@ Search tickets and return lightweight summaries for triage. Use this to find tic
   - My tickets active in the last 14 days: `assignee="me", updated_after="2026-05-20", sort_by="updated_at", sort_order="desc"`.
   - A pure id/subject list (no bodies): add `include_description=false`.
 
-> **Note on "my tickets":** `assignee="me"` (also `self`/`current`) is resolved server-side to the Zendesk user who authorized this server via OAuth (looked up once via `/api/v2/users/me.json`), so you can simply ask for "my tickets" without supplying an email. To search another agent's tickets, pass their email, user id, or full name explicitly.
+> **Note on "my tickets":** `assignee="me"` (also `self`/`current`) is resolved server-side to the Zendesk user who authorized this server via OAuth (looked up once per server process via `/api/v2/users/me.json`; if that lookup fails, Zendesk's native `me` keyword is used instead), so you can simply ask for "my tickets" without supplying an email. To search another agent's tickets, pass their email, user id, or full name explicitly.
 >
 > **Note on "assigned OR cc'd":** Zendesk search has no OR across fields, so "assigned to me **or** I'm in CC" is **two** searches (one with `assignee="me"`, one with `cc="me"`) whose results you merge — not a single call. Putting both in one call ANDs them (tickets where you are *both* assignee and CC).
 
@@ -308,7 +392,7 @@ Fetch a ticket attachment (image or PDF) by its `content_url` (as returned by `g
 - Input:
   - `content_url` (string): The `content_url` of the attachment
 
-- Output: Images are returned as image content. PDFs are returned as extracted plain text — the embedded text layer when present, otherwise local OCR (tesseract) of the rendered pages. The text is prefixed with a short header noting page count, extraction method (`text`/`ocr`/`mixed`), and whether it was truncated. See [Setup](#setup) for OCR requirements. Only the account's own Zendesk host and Zendesk's CDN are allowed (SSRF guard); attachments are capped at 10 MB.
+- Output: Images are returned as image content. PDFs are returned as extracted plain text — the embedded text layer when present, otherwise local OCR (tesseract) of the rendered pages. The text is prefixed with a short header noting page count, extraction method (`text`/`ocr`/`mixed`), and whether it was truncated. See [Setup](#setup) for OCR requirements. Only the account's own Zendesk host and Zendesk's CDN are allowed (SSRF guard), and the OAuth token is sent only to the account host — CDN URLs are fetched without credentials. Attachments are capped at 10 MB.
 
 ### create_ticket_comment
 
