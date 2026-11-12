@@ -33,5 +33,6 @@ RUN pip install --no-cache-dir --no-deps .
 # Drop privileges for the runtime container
 USER appuser
 
-# Default command – expects Zendesk credentials via environment variables or an --env-file
+# Default command – expects ZENDESK_SUBDOMAIN/ZENDESK_CLIENT_ID via --env-file and
+# the OAuth token store mounted at ZENDESK_TOKEN_FILE (see README > Docker).
 CMD ["zendesk"]
